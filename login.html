@@ -1,0 +1,284 @@
+ <!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>Secure Login (single file)</title>
+<style>
+  :root {
+    --bg: #0f1115; --card: #171a21; --border: #2a2e38; --text: #e8e9ec;
+    --muted: #9aa0ac; --accent: #5b8cff; --error: #ff6b6b; --success: #4cd77e;
+  }
+  * { box-sizing: border-box; }
+  body {
+    margin: 0; min-height: 100vh; display: flex; align-items: center; justify-content: center;
+    background: var(--bg); color: var(--text);
+    font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, sans-serif;
+  }
+  .card { width: 100%; max-width: 380px; background: var(--card); border: 1px solid var(--border);
+    border-radius: 12px; padding: 32px; }
+  h1 { font-size: 1.4rem; margin: 0 0 4px; }
+  .subtitle { color: var(--muted); font-size: 0.9rem; margin: 0 0 24px; }
+  label { display: block; font-size: 0.85rem; margin-bottom: 6px; color: var(--muted); }
+  input { width: 100%; padding: 10px 12px; border-radius: 8px; border: 1px solid var(--border);
+    background: #0d0f14; color: var(--text); font-size: 0.95rem; margin-bottom: 14px; }
+  input:focus { outline: none; border-color: var(--accent); }
+  button { width: 100%; padding: 11px; border: none; border-radius: 8px; background: var(--accent);
+    color: white; font-size: 0.95rem; font-weight: 600; cursor: pointer; }
+  button:hover { opacity: 0.92; }
+  button:disabled { opacity: 0.5; cursor: not-allowed; }
+  .secondary { background: transparent; border: 1px solid var(--border); margin-top: 10px; }
+  .msg { font-size: 0.85rem; margin-bottom: 14px; min-height: 1em; }
+  .msg.error { color: var(--error); }
+  .msg.success { color: var(--success); }
+  .foot { text-align: center; margin-top: 18px; font-size: 0.85rem; color: var(--muted); }
+  a { color: var(--accent); text-decoration: none; cursor: pointer; }
+  a:hover { text-decoration: underline; }
+  .hint { font-size: 0.78rem; color: var(--muted); margin: -8px 0 14px; }
+  .view { display: none; }
+  .view.active { display: block; }
+  .notice { font-size: 0.75rem; color: var(--muted); background: #0d0f14; border: 1px solid var(--border);
+    border-radius: 8px; padding: 10px 12px; margin-top: 20px; line-height: 1.4; }
+</style>
+</head>
+<body>
+
+<div class="card">
+
+  <!-- LOGIN VIEW -->
+  <div id="loginView" class="view active">
+    <h1>Welcome back</h1>
+    <p class="subtitle">Log in to your account</p>
+    <div id="loginMsg" class="msg"></div>
+    <form id="loginForm" novalidate>
+      <label for="loginEmail">Email</label>
+      <input type="email" id="loginEmail" autocomplete="email" required>
+      <label for="loginPassword">Password</label>
+      <input type="password" id="loginPassword" autocomplete="current-password" required>
+      <button type="submit" id="loginBtn">Log in</button>
+    </form>
+    <p class="foot">No account? <a id="goRegister">Create one</a></p>
+  </div>
+
+  <!-- REGISTER VIEW -->
+  <div id="registerView" class="view">
+    <h1>Create your account</h1>
+    <p class="subtitle">Takes less than a minute</p>
+    <div id="registerMsg" class="msg"></div>
+    <form id="registerForm" novalidate>
+      <label for="regEmail">Email</label>
+      <input type="email" id="regEmail" autocomplete="email" required>
+      <label for="regPassword">Password</label>
+      <input type="password" id="regPassword" autocomplete="new-password" required>
+      <p class="hint">At least 10 characters, with upper case, lower case, and a number.</p>
+      <button type="submit" id="registerBtn">Create account</button>
+    </form>
+    <p class="foot">Already have an account? <a id="goLogin">Log in</a></p>
+  </div>
+
+  <!-- DASHBOARD VIEW -->
+  <div id="dashboardView" class="view">
+    <h1>Dashboard</h1>
+    <p class="subtitle" id="welcomeMsg">Signed in</p>
+    <button id="logoutBtn">Log out</button>
+  </div>
+
+ 
+
+</div>
+
+<script>
+(function () {
+  "use strict";
+
+  // ---------- Config ----------
+  const USERS_KEY = "secureLoginApp_users";
+  const SESSION_KEY = "secureLoginApp_session";
+  const PBKDF2_ITERATIONS = 100000;
+  const MAX_FAILED_ATTEMPTS = 5;
+  const LOCK_MS = 15 * 60 * 1000; // 15 minutes
+  const SESSION_MS = 30 * 60 * 1000; // 30 minutes
+  const EMAIL_RE = /^[^\s@]+@[^\s@]+\.[^\s@]+$/;
+
+  // ---------- Storage helpers ----------
+  function loadUsers() {
+    try { return JSON.parse(localStorage.getItem(USERS_KEY)) || {}; }
+    catch { return {}; }
+  }
+  function saveUsers(users) {
+    localStorage.setItem(USERS_KEY, JSON.stringify(users));
+  }
+
+  // ---------- Crypto helpers (Web Crypto API, no plaintext passwords stored) ----------
+  function bufToHex(buf) {
+    return Array.from(new Uint8Array(buf)).map(b => b.toString(16).padStart(2, "0")).join("");
+  }
+  function hexToBuf(hex) {
+    const bytes = new Uint8Array(hex.length / 2);
+    for (let i = 0; i < bytes.length; i++) bytes[i] = parseInt(hex.substr(i * 2, 2), 16);
+    return bytes.buffer;
+  }
+  function randomSaltHex(bytes = 16) {
+    const arr = new Uint8Array(bytes);
+    crypto.getRandomValues(arr);
+    return bufToHex(arr);
+  }
+  async function deriveHash(password, saltHex) {
+    const enc = new TextEncoder();
+    const keyMaterial = await crypto.subtle.importKey(
+      "raw", enc.encode(password), { name: "PBKDF2" }, false, ["deriveBits"]
+    );
+    const bits = await crypto.subtle.deriveBits(
+      { name: "PBKDF2", salt: hexToBuf(saltHex), iterations: PBKDF2_ITERATIONS, hash: "SHA-256" },
+      keyMaterial, 256
+    );
+    return bufToHex(bits);
+  }
+  function timingSafeEqual(a, b) {
+    if (a.length !== b.length) return false;
+    let diff = 0;
+    for (let i = 0; i < a.length; i++) diff |= a.charCodeAt(i) ^ b.charCodeAt(i);
+    return diff === 0;
+  }
+
+  // ---------- Validation ----------
+  function isValidEmail(email) {
+    return typeof email === "string" && email.length <= 254 && EMAIL_RE.test(email);
+  }
+  function passwordIssue(password) {
+    if (typeof password !== "string") return "Password is required.";
+    if (password.length < 10) return "Password must be at least 10 characters.";
+    if (password.length > 128) return "Password is too long.";
+    if (!/[a-z]/.test(password) || !/[A-Z]/.test(password) || !/[0-9]/.test(password)) {
+      return "Password must include upper case, lower case, and a number.";
+    }
+    return null;
+  }
+
+  // ---------- View switching ----------
+  function showView(name) {
+    document.querySelectorAll(".view").forEach(v => v.classList.remove("active"));
+    document.getElementById(name + "View").classList.add("active");
+  }
+  function setMsg(elId, text, type) {
+    const el = document.getElementById(elId);
+    el.textContent = text || "";
+    el.className = "msg " + (type || "");
+  }
+
+  document.getElementById("goRegister").addEventListener("click", () => {
+    setMsg("loginMsg", ""); showView("register");
+  });
+  document.getElementById("goLogin").addEventListener("click", () => {
+    setMsg("registerMsg", ""); showView("login");
+  });
+
+  // ---------- Register ----------
+  document.getElementById("registerForm").addEventListener("submit", async (e) => {
+    e.preventDefault();
+    const btn = document.getElementById("registerBtn");
+    setMsg("registerMsg", "");
+    const email = document.getElementById("regEmail").value.trim().toLowerCase();
+    const password = document.getElementById("regPassword").value;
+
+    if (!isValidEmail(email)) return setMsg("registerMsg", "Please provide a valid email address.", "error");
+    const pwIssue = passwordIssue(password);
+    if (pwIssue) return setMsg("registerMsg", pwIssue, "error");
+
+    const users = loadUsers();
+    if (users[email]) return setMsg("registerMsg", "Unable to register with the provided details.", "error");
+
+    btn.disabled = true;
+    const saltHex = randomSaltHex();
+    const hashHex = await deriveHash(password, saltHex);
+
+    users[email] = { saltHex, hashHex, failedAttempts: 0, lockedUntil: null, createdAt: Date.now() };
+    saveUsers(users);
+
+    setMsg("registerMsg", "Account created. You can now log in.", "success");
+    document.getElementById("registerForm").reset();
+    btn.disabled = false;
+    setTimeout(() => { showView("login"); setMsg("registerMsg", ""); }, 1000);
+  });
+
+  // ---------- Login ----------
+  document.getElementById("loginForm").addEventListener("submit", async (e) => {
+    e.preventDefault();
+    const btn = document.getElementById("loginBtn");
+    setMsg("loginMsg", "");
+    const email = document.getElementById("loginEmail").value.trim().toLowerCase();
+    const password = document.getElementById("loginPassword").value;
+    const genericError = "Invalid email or password.";
+
+    if (!isValidEmail(email) || typeof password !== "string") {
+      return setMsg("loginMsg", genericError, "error");
+    }
+
+    btn.disabled = true;
+    const users = loadUsers();
+    const user = users[email];
+
+    if (user && user.lockedUntil && user.lockedUntil > Date.now()) {
+      btn.disabled = false;
+      return setMsg("loginMsg", "Account temporarily locked. Try again later.", "error");
+    }
+
+    // Always derive a hash, even for unknown emails, to avoid an obvious
+    // timing gap between "user exists" and "user doesn't exist" paths.
+    const saltForCheck = user ? user.saltHex : randomSaltHex();
+    const computedHex = await deriveHash(password, saltForCheck);
+    const passwordOk = user ? timingSafeEqual(computedHex, user.hashHex) : false;
+
+    if (!user || !passwordOk) {
+      if (user) {
+        user.failedAttempts = (user.failedAttempts || 0) + 1;
+        if (user.failedAttempts >= MAX_FAILED_ATTEMPTS) {
+          user.lockedUntil = Date.now() + LOCK_MS;
+        }
+        users[email] = user;
+        saveUsers(users);
+      }
+      btn.disabled = false;
+      return setMsg("loginMsg", genericError, "error");
+    }
+
+    user.failedAttempts = 0;
+    user.lockedUntil = null;
+    users[email] = user;
+    saveUsers(users);
+
+    const token = crypto.randomUUID();
+    sessionStorage.setItem(SESSION_KEY, JSON.stringify({ email, token, expires: Date.now() + SESSION_MS }));
+
+    setMsg("loginMsg", "Logged in.", "success");
+    btn.disabled = false;
+    document.getElementById("loginForm").reset();
+    enterDashboard(email);
+  });
+
+  // ---------- Dashboard / session ----------
+  function getSession() {
+    try {
+      const s = JSON.parse(sessionStorage.getItem(SESSION_KEY));
+      if (!s || !s.expires || s.expires < Date.now()) return null;
+      return s;
+    } catch { return null; }
+  }
+  function enterDashboard(email) {
+    document.getElementById("welcomeMsg").textContent = "Signed in as " + email;
+    showView("dashboard");
+  }
+  document.getElementById("logoutBtn").addEventListener("click", () => {
+    sessionStorage.removeItem(SESSION_KEY);
+    showView("login");
+  });
+
+  // ---------- Init: resume session if valid ----------
+  const existing = getSession();
+  if (existing) enterDashboard(existing.email);
+
+})();
+</script>
+
+</body>
+</html>
